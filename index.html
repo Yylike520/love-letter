@@ -523,6 +523,14 @@ function drawFX() {
    进入页面先尝试自动播放；被系统拦截的话，在她第一次触摸屏幕的瞬间立即起乐
    （这是 iOS 允许的最早时机，体感接近自动播放）。 */
 let audio = null, musicOn = false, musicTimer = null, musicWanted = false, songVersion = 0;
+/* 首选真实音频文件 music.wav——iOS Safari/微信对 <audio> 的支持远好于 WebAudio 合成 */
+const musicEl = new Audio("music.wav");
+musicEl.loop = true;
+musicEl.preload = "auto";
+musicEl.setAttribute("playsinline", "");
+musicEl.setAttribute("webkit-playsinline", "");
+let fileOK = null; // null=未知，true=文件可播，false=文件不可用（回退合成）
+musicEl.addEventListener("error", () => { fileOK = false; if (musicWanted) scheduleLoop(); }, { once: true });
 const BPM = 138, BEAT = 60 / BPM;
 const m2f = m => 440 * Math.pow(2, (m - 69) / 12);
 function ensureAudio() {
@@ -616,10 +624,14 @@ function startMusic() {
   musicWanted = true; musicOn = true;
   unlockAudio();
   setMusicUI(true);
-  scheduleLoop();
+  let p = null;
+  try { p = musicEl.play(); } catch (e) { }
+  if (p && p.then) p.then(() => { fileOK = true; }).catch(() => { fileOK = false; scheduleLoop(); });
+  else scheduleLoop();
 }
 function stopMusic() {
   musicWanted = false; musicOn = false; songVersion++;
+  try { musicEl.pause(); } catch (e) { }
   clearTimeout(musicTimer);
   setMusicUI(false);
 }
@@ -631,10 +643,15 @@ function stopMusic() {
     try {
       if (audio.state === "running") { startMusic(); return; }
     } catch (e) { }
-    document.addEventListener("pointerdown", function once() {
-      document.removeEventListener("pointerdown", once);
+    var armed = false;
+    function once() {
+      if (armed) return; armed = true;
+      document.removeEventListener("pointerdown", once, true);
+      document.removeEventListener("touchstart", once, true);
       if (!musicOn) startMusic();
-    }, { capture: true });
+    }
+    document.addEventListener("pointerdown", once, { capture: true });
+    document.addEventListener("touchstart", once, { capture: true });
   }
   if (document.readyState === "complete") setTimeout(attempt, 200);
   else addEventListener("load", () => setTimeout(attempt, 200));
@@ -643,13 +660,21 @@ $("btnMusic").addEventListener("click", () => {
   if (musicOn) { stopMusic(); }
   else { musicWanted = false; startMusic(); burst(innerWidth - 40, 40); }
 });
-/* 微信 iOS 内核：JSBridge 就绪后再补一次解锁 */
+/* 微信 iOS 内核：JSBridge 就绪后再补一次 */
 document.addEventListener("WeixinJSBridgeReady", () => {
-  if (musicWanted) { unlockAudio(); scheduleLoop(); }
+  if (musicWanted) {
+    unlockAudio();
+    try { musicEl.play(); } catch (e) { }
+    if (fileOK === false) scheduleLoop();
+  }
 }, false);
-/* 页面从后台回前台时，Safari 会把音频重新挂起，这里自动续上 */
+/* 页面从后台回前台时，Safari 会挂起音频，这里自动续上 */
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && musicWanted) { unlockAudio(); scheduleLoop(); }
+  if (!document.hidden && musicWanted) {
+    unlockAudio();
+    try { musicEl.play(); } catch (e) { }
+    if (fileOK === false) scheduleLoop();
+  }
 });
 </script>
 </body>
