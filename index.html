@@ -529,6 +529,11 @@ musicEl.loop = true;
 musicEl.preload = "auto";
 musicEl.setAttribute("playsinline", "");
 musicEl.setAttribute("webkit-playsinline", "");
+/* 挂进 DOM（隐藏）：部分浏览器只对文档内媒体做 preload，提前加载保证触摸瞬间即响 */
+try {
+  musicEl.style.display = "none";
+  document.body.appendChild(musicEl);
+} catch (e) { }
 let fileOK = null; // null=未知，true=文件可播，false=文件不可用（回退合成）
 musicEl.addEventListener("error", () => { fileOK = false; if (musicWanted) scheduleLoop(); }, { once: true });
 const BPM = 138, BEAT = 60 / BPM;
