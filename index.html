@@ -400,7 +400,11 @@ $("btnAgain").addEventListener("click", () => {
   $("dodgeLine").textContent = "";
   show("screenQuestion");
 });
-$("btnOpen").addEventListener("click", () => show("screenQuestion"));
+/* 打开信的手势里启动音乐——iOS 只允许在点击动作中解锁声音，这是唯一的自动播放时机 */
+$("btnOpen").addEventListener("click", () => {
+  startMusic();
+  show("screenQuestion");
+});
 
 /* ---------- 背景：漂浮的爱心 ---------- */
 const bg = $("bgCanvas"), bgx = bg.getContext("2d");
@@ -514,46 +518,138 @@ function drawFX() {
   } catch (e) { /* 提示失败不影响主流程 */ }
 })();
 
-/* ---------- 音乐：八音盒版卡农和弦琶音（WebAudio，无外部文件） ---------- */
-let audio = null, musicOn = false, musicTimer = null;
-const CHORDS = [ // 卡农进行 D–A–Bm–F#m–G–D–G–A（音名 → MIDI）
-  [[50, 57, 62, 66], [45, 52, 57, 61], [47, 54, 59, 62], [42, 49, 54, 58],
-   [43, 50, 55, 59], [38, 45, 50, 54], [43, 47, 50, 55], [45, 49, 52, 57]]
-];
+/* ---------- 音乐：原创喜庆小舞曲（音乐盒音色 + 铃鼓节奏，原创旋律无版权） ---------- */
+/* iOS 规定：音频必须在用户手指点击的动作里解锁。本页策略：
+   进入页面先尝试自动播放；被系统拦截的话，在她第一次触摸屏幕的瞬间立即起乐
+   （这是 iOS 允许的最早时机，体感接近自动播放）。 */
+let audio = null, musicOn = false, musicTimer = null, musicWanted = false, songVersion = 0;
+const BPM = 138, BEAT = 60 / BPM;
 const m2f = m => 440 * Math.pow(2, (m - 69) / 12);
 function ensureAudio() {
   if (audio) return;
   audio = new (window.AudioContext || window.webkitAudioContext)();
 }
+/* iOS / 微信内核的解锁：恢复上下文 + 播放一个无声样本"占位" */
+function unlockAudio() {
+  ensureAudio();
+  try {
+    if (audio.state === "suspended") audio.resume();
+    const buf = audio.createBuffer(1, 1, 22050);
+    const src = audio.createBufferSource();
+    src.buffer = buf;
+    src.connect(audio.destination);
+    src.start(0);
+  } catch (e) { /* 解锁失败不影响主流程 */ }
+}
 function pluck(freq, when, dur, gain) {
   const o = audio.createOscillator(), g = audio.createGain();
   o.type = "sine"; o.frequency.value = freq;
   g.gain.setValueAtTime(0, when);
-  g.gain.linearRampToValueAtTime(gain, when + 0.02);
+  g.gain.linearRampToValueAtTime(gain, when + 0.012);
   g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
   o.connect(g).connect(audio.destination);
   o.start(when); o.stop(when + dur + 0.05);
 }
-function playLoop() {
-  if (!musicOn) return;
-  const t0 = audio.currentTime + 0.05, noteLen = 0.34, chordLen = noteLen * 4;
-  const seq = CHORDS[0];
-  seq.forEach((chord, ci) => {
-    chord.forEach((m, ni) => {
-      pluck(m2f(m + (ni === 3 ? 12 : 0)), t0 + ci * chordLen + ni * noteLen, 1.6, ni === 0 ? 0.075 : 0.05);
-    });
-    pluck(m2f(chord[0] - 24), t0 + ci * chordLen, 2.6, 0.045); // 低音铺底
-  });
-  musicTimer = setTimeout(playLoop, seq.length * chordLen * 1000);
+/* 铃鼓"嗒"：短促带通噪声，营造喜庆的跳跃感 */
+let noiseBuf = null;
+function tick(when, gain) {
+  try {
+    if (!noiseBuf) {
+      noiseBuf = audio.createBuffer(1, 2205, 22050);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+    }
+    const src = audio.createBufferSource(); src.buffer = noiseBuf;
+    const bp = audio.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 5200; bp.Q.value = 1.2;
+    const g = audio.createGain();
+    g.gain.setValueAtTime(gain, when);
+    g.gain.exponentialRampToValueAtTime(0.0001, when + 0.07);
+    src.connect(bp).connect(g).connect(audio.destination);
+    src.start(when); src.stop(when + 0.09);
+  } catch (e) { }
 }
+/* 原创旋律：C 大调欢快小舞曲，16 小节循环。数据格式 [MIDI音高, 拍数]，每小节 2 拍 */
+const MELODY = [
+  [76,.5],[79,.5],[84,.5],[79,.5], [76,.5],[79,.5],[84,1],
+  [74,.5],[79,.5],[83,.5],[79,.5], [74,.5],[79,.5],[83,1],
+  [76,.5],[79,.5],[84,.5],[79,.5], [76,.5],[79,.5],[84,1],
+  [77,.5],[81,.5],[84,.5],[81,.5], [79,.75],[76,.25],[72,1],
+  [81,.5],[84,.5],[89,.5],[84,.5], [81,.5],[84,.5],[89,1],
+  [79,.5],[83,.5],[88,.5],[83,.5], [79,.5],[83,.5],[88,1],
+  [89,.5],[86,.5],[83,.5],[79,.5], [81,.5],[83,.5],[84,1],
+  [86,.5],[83,.5],[79,.5],[76,.5], [72,1],[67,.5],[72,.5]
+];
+/* 每小节低音根音（boom-chick 伴奏） */
+const BASS = [48,48,43,43, 48,48,41,48, 41,41,43,43, 43,48,43,48];
+/* 只有在 audio 真正 running 后才排程，否则稍后重试——
+   修复 iOS 上解锁瞬间时间轴未走、音符被排到过去导致"无声"的问题；
+   songVersion 防止重入时叠加出双份音乐 */
+function scheduleLoop() {
+  clearTimeout(musicTimer);
+  if (!musicWanted || !audio) return;
+  if (audio.state !== "running") { musicTimer = setTimeout(scheduleLoop, 250); return; }
+  const v = ++songVersion;
+  const t0 = audio.currentTime + 0.08;
+  let t = t0;
+  for (const note of MELODY) {
+    const dur = note[1] * BEAT;
+    pluck(m2f(note[0]), t, Math.max(0.35, dur * 1.6), 0.10);        // 主音：音乐盒
+    pluck(m2f(note[0] + 12), t, Math.max(0.3, dur * 1.1), 0.028);   // 高八度：闪光
+    t += dur;
+  }
+  const total = t - t0;
+  for (let bar = 0; bar < BASS.length; bar++) {
+    const bt = t0 + bar * 2 * BEAT;
+    pluck(m2f(BASS[bar]), bt, 0.5, 0.09);                 // 咚（根音）
+    pluck(m2f(BASS[bar] + 7), bt + BEAT, 0.35, 0.06);     // 咚（五音）
+    tick(bt, 0.05);                                        // 嗒（重拍）
+    tick(bt + BEAT, 0.028);                                // 嗒（弱拍）
+  }
+  musicTimer = setTimeout(() => { if (v === songVersion) scheduleLoop(); }, total * 1000);
+}
+function setMusicUI(on) {
+  $("btnMusic").textContent = on ? "🎵" : "🔇";
+  $("btnMusic").classList.toggle("playing", on);
+}
+function startMusic() {
+  if (musicWanted) return;
+  musicWanted = true; musicOn = true;
+  unlockAudio();
+  setMusicUI(true);
+  scheduleLoop();
+}
+function stopMusic() {
+  musicWanted = false; musicOn = false; songVersion++;
+  clearTimeout(musicTimer);
+  setMusicUI(false);
+}
+/* 进入页面先尝试自动播放；若被 iOS 拦截，第一次触摸屏幕的瞬间立即起乐 */
+(function autoPlay() {
+  function attempt() {
+    if (musicOn) return;
+    unlockAudio();
+    try {
+      if (audio.state === "running") { startMusic(); return; }
+    } catch (e) { }
+    document.addEventListener("pointerdown", function once() {
+      document.removeEventListener("pointerdown", once);
+      if (!musicOn) startMusic();
+    }, { capture: true });
+  }
+  if (document.readyState === "complete") setTimeout(attempt, 200);
+  else addEventListener("load", () => setTimeout(attempt, 200));
+})();
 $("btnMusic").addEventListener("click", () => {
-  ensureAudio();
-  if (audio.state === "suspended") audio.resume();
-  musicOn = !musicOn;
-  $("btnMusic").textContent = musicOn ? "🎵" : "🔇";
-  $("btnMusic").classList.toggle("playing", musicOn);
-  if (musicOn) { playLoop(); burst(innerWidth - 40, 40); }
-  else { clearTimeout(musicTimer); }
+  if (musicOn) { stopMusic(); }
+  else { musicWanted = false; startMusic(); burst(innerWidth - 40, 40); }
+});
+/* 微信 iOS 内核：JSBridge 就绪后再补一次解锁 */
+document.addEventListener("WeixinJSBridgeReady", () => {
+  if (musicWanted) { unlockAudio(); scheduleLoop(); }
+}, false);
+/* 页面从后台回前台时，Safari 会把音频重新挂起，这里自动续上 */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && musicWanted) { unlockAudio(); scheduleLoop(); }
 });
 </script>
 </body>
